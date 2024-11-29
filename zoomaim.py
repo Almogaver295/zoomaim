@@ -1,12 +1,11 @@
 import sys
 import json
-import os
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QSlider, QLineEdit
 )
 from PyQt5.QtCore import Qt, QTimer, QEvent, pyqtSignal, QObject, QRect, QPoint
-from PyQt5.QtGui import QKeySequence, QPixmap, QImage, QPainter, QColor, QPen, QCursor
+from PyQt5.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QCursor, QKeySequence
 import pyautogui
 import cv2
 import numpy as np
@@ -15,12 +14,9 @@ from pynput import keyboard  # Para la escucha global de teclas
 # Definir el archivo de configuración
 CONFIG_FILE = "zoom_config.json"
 
-
 class Communicate(QObject):
-    # Señales personalizadas para comunicar entre hilos
-    zoom_started = pyqtSignal()
-    zoom_stopped = pyqtSignal()
-
+    # Señal personalizada para toggle del zoom
+    toggle_zoom = pyqtSignal()
 
 class ConfigWindow(QWidget):
     def __init__(self, parent):
@@ -45,7 +41,7 @@ class ConfigWindow(QWidget):
 
         # Detección de tecla
         key_layout = QHBoxLayout()
-        key_label = QLabel("Tecla de Zoom:")
+        key_label = QLabel("Tecla Toggle Zoom:")
         self.key_input = QLineEdit()
         self.key_input.setPlaceholderText("Presiona una tecla")
         self.key_input.setReadOnly(True)
@@ -72,7 +68,7 @@ class ConfigWindow(QWidget):
         if source == self.key_input and event.type() == QEvent.KeyPress:
             key = event.key()
             key_text = QKeySequence(key).toString()
-            if key_text:  # Asegurar que se presionó una tecla válida
+            if key_text:
                 self.key_input.setText(key_text)
                 self.captured_key = key  # Almacenar el código de la tecla
             return True
@@ -91,14 +87,13 @@ class ConfigWindow(QWidget):
         # Guardar configuraciones válidas
         self.parent.zoom_key = self.captured_key  # Guardar el código de la tecla
         self.parent.save_settings()
-        print(f"Nuevas configuraciones aplicadas: Tecla de Zoom = {self.parent.zoom_key}, Nivel de Zoom = {self.parent.zoom_level}")
+        print(f"Nuevas configuraciones aplicadas: Tecla Toggle Zoom = {self.parent.zoom_key}, Nivel de Zoom = {self.parent.zoom_level}")
 
         # Reiniciar el listener de teclas para usar la nueva tecla
         self.parent.restart_key_listener()
 
         # Cerrar solo la ventana de configuración
         self.close()
-
 
 class SelectionWindow(QMainWindow):
     def __init__(self, parent=None):
@@ -107,9 +102,6 @@ class SelectionWindow(QMainWindow):
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
         self.setWindowState(Qt.WindowFullScreen)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.begin = QPoint()
-        self.end = QPoint()
-        self.selected_rect = QRect()
         self.parent_app = parent
 
         # Variables para mover y redimensionar
@@ -128,6 +120,10 @@ class SelectionWindow(QMainWindow):
         self.button_layout.addWidget(self.save_button)
         self.button_widget.setLayout(self.button_layout)
         self.button_widget.setGeometry(10, 10, 100, 40)  # Posición y tamaño del botón
+
+        # Verificar dimensiones de pantalla
+        screen_geometry = QApplication.primaryScreen().geometry()
+        print(f"Resolución de pantalla en SelectionWindow: {screen_geometry.width()}x{screen_geometry.height()}")
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -251,27 +247,23 @@ class SelectionWindow(QMainWindow):
 
     def save_selection(self):
         if self.parent_app:
-            # Convertir las coordenadas del rectángulo a coordenadas globales
-            global_top_left = self.mapToGlobal(self.rect.topLeft())
-            global_bottom_right = self.mapToGlobal(self.rect.bottomRight())
-            global_rect = QRect(global_top_left, global_bottom_right)
+            # Usar directamente el rectángulo seleccionado, ya que SelectionWindow está en pantalla completa
+            global_rect = self.rect
+            print(f"Área de zoom establecida (global): x={global_rect.x()}, y={global_rect.y()}, width={global_rect.width()}, height={global_rect.height()}")
 
             # Pasar el rectángulo global a la aplicación principal
             self.parent_app.set_zoom_area(global_rect)
-            print(f"Área de zoom establecida: {global_rect}")
         self.close()
-
 
 class ZoomApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.communicate = Communicate()
-        self.communicate.zoom_started.connect(self.start_zoom)
-        self.communicate.zoom_stopped.connect(self.stop_zoom)
+        self.communicate.toggle_zoom.connect(self.toggle_zoom)
 
         self.load_settings()
         self.setGeometry(100, 100, 300, 300)
-        self.setWindowTitle("Zoom Rectangle")
+        self.setWindowTitle("Zoom Tool")
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet("background-color: rgba(0, 255, 0, 0.2); border: 2px solid green;")
@@ -284,6 +276,9 @@ class ZoomApp(QMainWindow):
         self.zoom_window.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.zoom_window.setStyleSheet("background: black; color: white; border: 2px solid red;")
         self.zoom_window.setAttribute(Qt.WA_TransparentForMouseEvents)  # Hacerla transparente a eventos del ratón
+        # Set attributes to reduce flickering
+        self.zoom_window.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.zoom_window.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.zoom_window.hide()
 
         # Temporizador para actualizar el zoom
@@ -331,21 +326,70 @@ class ZoomApp(QMainWindow):
         if self.zoom_window.isVisible():
             self.update_zoom()
 
-    def keyPressEvent(self, event):
-        # Este método ya no es necesario si usamos un listener global
-        pass
-
-    def keyReleaseEvent(self, event):
-        # Este método ya no es necesario si usamos un listener global
-        pass
+    def toggle_zoom(self):
+        if not self.zoom_active_flag:
+            self.start_zoom()
+        else:
+            self.stop_zoom()
 
     def start_zoom(self):
         if not self.zoom_active_flag:
             print("Iniciando zoom...")
             self.zoom_active_flag = True
-            self.zoom_window.show()  # Mostrar la ventana de zoom una vez
+
+            rect = self.zoom_area
+
+            # Asegurarse de que las coordenadas están dentro de los límites de la pantalla
+            screen_geometry = QApplication.primaryScreen().geometry()
+            screen_width = screen_geometry.width()
+            screen_height = screen_geometry.height()
+
+            adjusted_x = max(0, min(rect.x(), screen_width - rect.width()))
+            adjusted_y = max(0, min(rect.y(), screen_height - rect.height()))
+            adjusted_width = rect.width()
+            adjusted_height = rect.height()
+
+            zoom_level = max(1, min(self.zoom_level, 5))
+            zoomed_width = adjusted_width * zoom_level
+            zoomed_height = adjusted_height * zoom_level
+
+            # Evitar que el zoom exceda las dimensiones de la pantalla
+            zoomed_width = min(zoomed_width, screen_width - 20)  # 10 píxeles de margen a cada lado
+            zoomed_height = min(zoomed_height, screen_height - 20)
+
+            print(f"Zoom Level aplicado: {zoom_level}")
+            print(f"Tamaño de la ventana de zoom: {int(zoomed_width)}x{int(zoomed_height)}")
+
+            # Establecer tamaño de la ventana de zoom
+            self.zoom_window.resize(int(zoomed_width), int(zoomed_height))
+
+            # Posicionar la ventana de zoom cerca del área seleccionada
+            desired_x = rect.x() + rect.width() + 10  # 10 píxeles de margen a la derecha
+            desired_y = rect.y()
+
+            print(f"Posición antes de verificar: x={desired_x}, y={desired_y}")
+
+            # Verificar si la ventana de zoom excede el ancho de la pantalla
+            if desired_x + zoomed_width > screen_width:
+                desired_x = rect.x() - zoomed_width - 10  # 10 píxeles de margen a la izquierda
+                if desired_x < 0:
+                    desired_x = 10  # Fallback a 10 píxeles de margen desde la izquierda
+            if desired_y + zoomed_height > screen_height:
+                desired_y = screen_height - zoomed_height - 10  # 10 píxeles de margen desde arriba
+
+            print(f"Posición final de la ventana de zoom: x={int(desired_x)}, y={int(desired_y)}")
+
+            # Mover la ventana de zoom
+            self.zoom_window.move(int(desired_x), int(desired_y))
+
+            # Mostrar la ventana de zoom
+            self.zoom_window.show()
+
+            # Capturar y mostrar la primera imagen
             self.update_zoom()
-            self.zoom_timer.start(300)  # Aumentar a 300ms para reducir la frecuencia
+
+            # Iniciar el temporizador para actualizaciones
+            self.zoom_timer.start(300)  # 300ms de intervalo
 
     def stop_zoom(self):
         if self.zoom_active_flag:
@@ -355,63 +399,49 @@ class ZoomApp(QMainWindow):
             self.zoom_window.hide()
 
     def update_zoom(self):
+        if not self.zoom_active_flag:
+            return
+
         print("Actualizando zoom...")
+        print(f"Nivel de zoom actual: {self.zoom_level}")
         rect = self.zoom_area
         print(f"Coordenadas del rectángulo de zoom (Global): x={rect.x()}, y={rect.y()}, width={rect.width()}, height={rect.height()}")
 
-        # Ajustar las coordenadas sin scaling_factor
-        adjusted_x = rect.x()
-        adjusted_y = rect.y()
-        adjusted_width = rect.width()
-        adjusted_height = rect.height()
+        # Calcular el zoom
+        zoom_level = max(1, min(self.zoom_level, 5))
+        zoomed_width = rect.width() * zoom_level
+        zoomed_height = rect.height() * zoom_level
 
-        # Validar las coordenadas para que estén dentro de los límites de la pantalla
+        # Evitar que el zoom exceda las dimensiones de la pantalla
         screen_geometry = QApplication.primaryScreen().geometry()
         screen_width = screen_geometry.width()
         screen_height = screen_geometry.height()
-
-        adjusted_x = max(0, min(adjusted_x, screen_width - adjusted_width))
-        adjusted_y = max(0, min(adjusted_y, screen_height - adjusted_height))
-
-        print(f"Coordenadas ajustadas para pyautogui: x={adjusted_x}, y={adjusted_y}, width={adjusted_width}, height={adjusted_height}")
-
-        # Calcular la posición y tamaño basado en el nivel de zoom
-        # Asegurarnos de que zoom_level es un valor razonable (1 a 5)
-        zoom_level = max(1, min(self.zoom_level, 5))
-        zoomed_width = adjusted_width * zoom_level
-        zoomed_height = adjusted_height * zoom_level
-
-        # Evitar que el zoom exceda las dimensiones de la pantalla
-        zoomed_width = min(zoomed_width, screen_width - 20)  # 10 píxeles de margen a cada lado
+        zoomed_width = min(zoomed_width, screen_width - 20)
         zoomed_height = min(zoomed_height, screen_height - 20)
 
-        # Establecer tamaño fijo de la ventana de zoom basado en zoom_level
-        self.zoom_window.resize(int(zoomed_width), int(zoomed_height))
+        print(f"Zoom Level aplicado: {zoom_level}")
+        print(f"Tamaño de la ventana de zoom: {int(zoomed_width)}x{int(zoomed_height)}")
 
-        # Determinar la posición exacta de la zoom_window en el área seleccionada
-        # Asegurarse de que la ventana de zoom no se salga de la pantalla
-        desired_x = adjusted_x
-        desired_y = adjusted_y
-
-        desired_x = max(0, min(desired_x, screen_width - zoomed_width))
-        desired_y = max(0, min(desired_y, screen_height - zoomed_height))
-
-        self.zoom_window.move(int(desired_x), int(desired_y))
-        print(f"Posición exacta de la ventana de zoom: x={int(desired_x)}, y={int(desired_y)}")
-
+        # Capturar la región seleccionada de la pantalla
         try:
-            # Capturar la región seleccionada de la pantalla
+            # Usando pyautogui
             screenshot = pyautogui.screenshot(region=(
-                int(adjusted_x),
-                int(adjusted_y),
-                int(adjusted_width),
-                int(adjusted_height)
+                int(rect.x()),
+                int(rect.y()),
+                int(rect.width()),
+                int(rect.height())
             ))
             print("Capturando pantalla en la región especificada.")
+
+            # Guardar la captura para verificar visualmente
+            screenshot.save("captura_de_zoom.png")
+            print("Captura de pantalla guardada como 'captura_de_zoom.png'.")
+
+            # Convertir la captura a formato OpenCV
             screenshot = np.array(screenshot)
             screenshot = cv2.cvtColor(screenshot, cv2.COLOR_RGB2BGR)
 
-            # Aplicar el zoom
+            # Aplicar el zoom (escalado)
             zoomed = cv2.resize(screenshot, (int(zoomed_width), int(zoomed_height)), interpolation=cv2.INTER_LINEAR)
 
             # Convertir la imagen a QPixmap y mostrarla
@@ -431,13 +461,17 @@ class ZoomApp(QMainWindow):
         try:
             with open(CONFIG_FILE, "r") as file:
                 config = json.load(file)
-                self.zoom_level = config.get("zoom_level", 2)
+                # Capping zoom_level to [1,5] to prevent excessive values
+                self.zoom_level = max(1, min(config.get("zoom_level", 2), 5))
                 self.rect_size = config.get("rect_size", 300)
                 self.zoom_key = config.get("zoom_key", Qt.Key_Shift)
+                print(f"Configuración cargada: zoom_level={self.zoom_level}, rect_size={self.rect_size}, zoom_key={self.zoom_key}")
         except FileNotFoundError:
+            # Valores predeterminados si no se encuentra el archivo de configuración
             self.zoom_level = 2
             self.rect_size = 300
             self.zoom_key = Qt.Key_Shift
+            print("Archivo de configuración no encontrado. Usando valores predeterminados.")
 
     def save_settings(self):
         print("Guardando configuraciones...")
@@ -458,14 +492,10 @@ class ZoomApp(QMainWindow):
             self.listener.stop()
 
         def on_press(key):
-            if self.pynput_key and key in self.pynput_key and not self.zoom_active_flag:
+            # Manejar la pulsación de tecla para togglear zoom
+            if key in self.pynput_key:
                 print("Tecla de zoom presionada detectada por el listener.")
-                self.communicate.zoom_started.emit()
-
-        def on_release(key):
-            if self.pynput_key and key in self.pynput_key and self.zoom_active_flag:
-                print("Tecla de zoom soltada detectada por el listener.")
-                self.communicate.zoom_stopped.emit()
+                self.communicate.toggle_zoom.emit()
 
         # Mapear la tecla de Qt a la tecla de pynput
         self.pynput_key = self.map_qt_key_to_pynput(self.zoom_key)
@@ -479,8 +509,8 @@ class ZoomApp(QMainWindow):
                 self.pynput_key = [self.pynput_key]
 
             self.listener = keyboard.Listener(
-                on_press=on_press,
-                on_release=on_release)
+                on_press=on_press
+            )
             self.listener.start()
             print("Listener global de teclas iniciado.")
         else:
@@ -532,7 +562,6 @@ class ZoomApp(QMainWindow):
         if self.listener:
             self.listener.stop()
         event.accept()
-
 
 if __name__ == "__main__":
     # Habilitar atributos de alta DPI antes de crear QApplication
